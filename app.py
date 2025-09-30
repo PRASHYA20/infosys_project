@@ -3,39 +3,17 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageDraw
 import io
 import os
-import cv2
-import torch
-import torch.nn as nn
-import torchvision.transforms as transforms
+import math
 
 # Set page config
 st.set_page_config(
-    page_title="Oil Spill Detection - Correct",
+    page_title="Oil Spill Detection - No Dependencies",
     page_icon="🌊",
     layout="wide"
 )
 
-st.title("🌊 Oil Spill Detection - Image Segmentation")
-st.write("Proper oil spill detection using image segmentation techniques")
-
-# Check for model files
-def find_segmentation_models():
-    """Find proper segmentation model files"""
-    model_files = []
-    for f in os.listdir('.'):
-        if f.endswith(('.pth', '.pt', '.pkl', '.h5', '.onnx')):
-            model_files.append(f)
-    return model_files
-
-model_files = find_segmentation_models()
-
-# Display model status
-st.sidebar.header("🔧 Model Status")
-if model_files:
-    for model_file in model_files:
-        st.sidebar.success(f"✅ {model_file}")
-else:
-    st.sidebar.warning("🤖 No model files found - Using computer vision")
+st.title("🌊 Oil Spill Detection - Computer Vision")
+st.write("Proper oil spill detection using only basic Python libraries")
 
 # Settings
 st.sidebar.header("⚙️ Detection Settings")
@@ -44,249 +22,301 @@ confidence_threshold = st.sidebar.slider(
     0.1, 0.9, 0.5, 0.1
 )
 
+st.sidebar.header("🔧 Advanced Settings")
 min_spill_size = st.sidebar.slider("Minimum Spill Size", 100, 2000, 500, 100)
-max_spill_size = st.sidebar.slider("Maximum Spill Size", 1000, 10000, 3000, 500)
+detection_sensitivity = st.sidebar.slider("Detection Sensitivity", 0.1, 1.0, 0.7, 0.1)
 
-def proper_image_segmentation(image_array):
+def proper_water_detection(image_array):
     """
-    Proper oil spill detection using computer vision and segmentation
+    Proper water detection using only basic libraries
     """
     h, w = image_array.shape[:2]
+    r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
     
-    # Convert to appropriate color spaces
-    rgb = image_array
-    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
-    
-    # Extract channels
-    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    l, a, lab_b = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
-    
-    # 1. Water detection using multiple methods
-    water_mask = detect_water_areas(rgb, hsv, lab)
-    
-    # 2. Oil spill detection within water areas
-    oil_mask = detect_oil_spills(rgb, hsv, lab, water_mask)
-    
-    # 3. Post-processing
-    oil_mask = post_process_mask(oil_mask, min_spill_size, max_spill_size)
-    
-    return oil_mask, water_mask
-
-def detect_water_areas(rgb, hsv, lab):
-    """
-    Detect water areas using multiple computer vision techniques
-    """
-    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    # Convert to float for calculations
+    r_f, g_f, b_f = r.astype(float), g.astype(float), b.astype(float)
     
     # Method 1: Blue dominance (water is typically blue)
-    blue_dominance = (b > r * 1.2) & (b > g * 1.2)
+    blue_dominance = (b_f > r_f * 1.15) & (b_f > g_f * 1.15)
     
-    # Method 2: HSV-based water detection
-    water_hsv = (h > 90) & (h < 130) & (s > 30) & (s < 200) & (v > 50)
-    
-    # Method 3: NDWI-like calculation
+    # Method 2: NDWI-like calculation
     with np.errstate(divide='ignore', invalid='ignore'):
-        ndwi = (g.astype(float) - r.astype(float)) / (g.astype(float) + r.astype(float) + 1e-8)
+        ndwi = (g_f - r_f) / (g_f + r_f + 1e-8)
         ndwi = np.nan_to_num(ndwi)
     water_ndwi = ndwi > 0.1
     
-    # Method 4: Texture-based (water is smoother)
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    texture = cv2.Laplacian(gray, cv2.CV_64F)
-    texture = np.abs(texture)
+    # Method 3: Simple texture analysis (water is smoother)
+    gray = np.mean(image_array, axis=2)
+    
+    # Calculate gradient manually (no OpenCV)
+    grad_x = np.abs(gray[:, 1:] - gray[:, :-1])
+    grad_y = np.abs(gray[1:, :] - gray[:-1, :])
+    
+    # Pad gradients to original size
+    grad_x = np.pad(grad_x, ((0, 0), (0, 1)), mode='edge')
+    grad_y = np.pad(grad_y, ((0, 1), (0, 0)), mode='edge')
+    
+    texture = (grad_x + grad_y) / 2
     smooth_areas = texture < np.percentile(texture, 40)
     
-    # Combine methods
+    # Method 4: Brightness range
+    brightness = (r_f + g_f + b_f) / 3
+    good_brightness = (brightness > 40) & (brightness < 200)
+    
+    # Combine all methods
     water_confidence = (
         blue_dominance.astype(float) * 0.4 +
-        water_hsv.astype(float) * 0.3 +
-        water_ndwi.astype(float) * 0.2 +
-        smooth_areas.astype(float) * 0.1
+        water_ndwi.astype(float) * 0.3 +
+        smooth_areas.astype(float) * 0.2 +
+        good_brightness.astype(float) * 0.1
     )
     
     water_mask = water_confidence > 0.4
     
-    # Clean up water mask
-    kernel = np.ones((5, 5), np.uint8)
-    water_mask = water_mask.astype(np.uint8)
-    water_mask = cv2.morphologyEx(water_mask, cv2.MORPH_CLOSE, kernel)
-    water_mask = cv2.morphologyEx(water_mask, cv2.MORPH_OPEN, kernel)
+    # Clean mask using PIL filters instead of OpenCV morphology
+    water_pil = Image.fromarray(water_mask.astype(np.uint8) * 255)
     
-    return water_mask.astype(bool)
+    # Closing operation (dilate then erode)
+    water_closed = water_pil.filter(ImageFilter.MaxFilter(5))
+    water_closed = water_closed.filter(ImageFilter.MinFilter(5))
+    
+    # Opening operation (erode then dilate)  
+    water_clean = water_closed.filter(ImageFilter.MinFilter(3))
+    water_clean = water_clean.filter(ImageFilter.MaxFilter(3))
+    
+    return np.array(water_clean) > 128
 
-def detect_oil_spills(rgb, hsv, lab, water_mask):
+def detect_oil_spills_basic(image_array, water_mask):
     """
-    Detect oil spills within water areas using visual characteristics
+    Detect oil spills using only basic image processing
     """
-    h, w = rgb.shape[:2]
+    h, w = image_array.shape[:2]
     oil_mask = np.zeros((h, w), dtype=np.float32)
     
     if not np.any(water_mask):
         return oil_mask
     
-    # Work only within water areas
-    water_pixels = np.where(water_mask)
-    
-    if len(water_pixels[0]) == 0:
-        return oil_mask
-    
-    # Oil spill characteristics in water:
-    # 1. Darker than surrounding water
-    # 2. Rainbow sheen patterns
-    # 3. Smooth texture differences
-    # 4. Specific color patterns
-    
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
+    gray = np.mean(image_array, axis=2)
     
     # 1. Dark regions in water (oil is often darker)
     water_gray = gray[water_mask]
     if len(water_gray) > 0:
         dark_threshold = np.percentile(water_gray, 30)
         dark_regions = (gray < dark_threshold) & water_mask
-        
-        # Add dark regions to oil mask
-        oil_mask[dark_regions] += 0.4
+        oil_mask[dark_regions] += 0.4 * detection_sensitivity
     
-    # 2. Rainbow sheen detection (oil creates rainbow patterns)
-    rainbow_mask = detect_rainbow_sheen(rgb, hsv, water_mask)
-    oil_mask[rainbow_mask] += 0.6
+    # 2. Color anomalies (oil creates color shifts)
+    color_anomalies = detect_color_anomalies_basic(image_array, water_mask)
+    oil_mask[color_anomalies] += 0.6 * detection_sensitivity
     
     # 3. Edge detection for spill boundaries
-    edges = cv2.Canny(gray, 50, 150)
+    edges = detect_edges_basic(gray)
     oil_edges = edges & water_mask
-    oil_mask[oil_edges] += 0.3
+    oil_mask[oil_edges] += 0.3 * detection_sensitivity
     
-    # 4. Color anomaly detection
-    color_anomalies = detect_color_anomalies(rgb, water_mask)
-    oil_mask[color_anomalies] += 0.5
+    # 4. Saturation variations (rainbow sheen)
+    saturation_variations = detect_saturation_variations(image_array, water_mask)
+    oil_mask[saturation_variations] += 0.5 * detection_sensitivity
     
-    # Normalize and threshold
+    # Normalize and apply only to water areas
     oil_mask = np.clip(oil_mask, 0, 1)
-    oil_mask = oil_mask * water_mask  # Only in water areas
+    oil_mask = oil_mask * water_mask.astype(float)
     
     return oil_mask
 
-def detect_rainbow_sheen(rgb, hsv, water_mask):
+def detect_color_anomalies_basic(image_array, water_mask):
     """
-    Detect rainbow sheen patterns characteristic of oil spills
+    Detect color anomalies without OpenCV
     """
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
     
-    # Rainbow sheen typically has high saturation variation
-    saturation_variation = cv2.blur(s, (5, 5))
-    saturation_std = cv2.blur(np.abs(s - saturation_variation), (5, 5))
+    # Convert to simple LAB-like space manually
+    # Simple luminance
+    luminance = (r + g + b) / 3
     
-    # High saturation variation in small areas
-    high_sat_variation = saturation_std > np.percentile(saturation_std[water_mask], 70) if np.any(water_mask) else np.zeros_like(water_mask)
-    
-    # Combined with medium-high saturation
-    medium_saturation = (s > 50) & (s < 200)
-    
-    rainbow_sheen = high_sat_variation & medium_saturation & water_mask
-    
-    return rainbow_sheen
-
-def detect_color_anomalies(rgb, water_mask):
-    """
-    Detect color anomalies that indicate oil contamination
-    """
-    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
-    l, a, b = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
+    # Simple color channels (approximate a and b channels)
+    a_like = r - g  # Red-green difference
+    b_like = b - (r + g) / 2  # Blue relative to red/green average
     
     # Oil often creates specific color shifts
-    # High a-channel values (green-red axis) can indicate oil
-    a_channel_anomaly = a > np.percentile(a[water_mask], 70) if np.any(water_mask) else np.zeros_like(water_mask)
+    if np.any(water_mask):
+        a_threshold = np.percentile(a_like[water_mask], 70)
+        b_threshold_low = np.percentile(b_like[water_mask], 60)
+        b_threshold_high = np.percentile(b_like[water_mask], 90)
+        
+        a_anomaly = a_like > a_threshold
+        b_anomaly = (b_like > b_threshold_low) & (b_like < b_threshold_high)
+    else:
+        a_anomaly = np.zeros_like(water_mask)
+        b_anomaly = np.zeros_like(water_mask)
     
-    # Specific b-channel patterns (blue-yellow axis)
-    b_channel_anomaly = (b > np.percentile(b[water_mask], 60)) & (b < np.percentile(b[water_mask], 90)) if np.any(water_mask) else np.zeros_like(water_mask)
-    
-    color_anomalies = (a_channel_anomaly | b_channel_anomaly) & water_mask
-    
+    color_anomalies = (a_anomaly | b_anomaly) & water_mask
     return color_anomalies
 
-def post_process_mask(oil_mask, min_size, max_size):
+def detect_edges_basic(gray):
     """
-    Post-process the oil spill mask
+    Basic edge detection without OpenCV
     """
-    oil_mask_uint8 = (oil_mask * 255).astype(np.uint8)
+    h, w = gray.shape
     
-    # Remove small noise
-    kernel = np.ones((3, 3), np.uint8)
-    oil_mask_clean = cv2.morphologyEx(oil_mask_uint8, cv2.MORPH_OPEN, kernel)
+    # Simple gradient calculation
+    grad_x = np.abs(gray[:, 1:] - gray[:, :-1])
+    grad_y = np.abs(gray[1:, :] - gray[:-1, :])
     
-    # Fill small holes
-    oil_mask_clean = cv2.morphologyEx(oil_mask_clean, cv2.MORPH_CLOSE, kernel)
+    # Pad to original size
+    grad_x = np.pad(grad_x, ((0, 0), (0, 1)), mode='edge')
+    grad_y = np.pad(grad_y, ((0, 1), (0, 0)), mode='edge')
     
-    # Remove small components
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(oil_mask_clean, connectivity=8)
+    # Combine gradients
+    edges = (grad_x + grad_y) > 50  # Threshold for edges
     
-    final_mask = np.zeros_like(oil_mask_clean)
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if min_size <= area <= max_size:
-            final_mask[labels == i] = 255
-    
-    # Smooth boundaries
-    final_mask = cv2.GaussianBlur(final_mask, (5, 5), 0)
-    final_mask = (final_mask > 127).astype(np.float32)
-    
-    return final_mask
+    return edges
 
-def create_correct_overlay(original_image, oil_mask, water_mask=None):
+def detect_saturation_variations(image_array, water_mask):
     """
-    Create correct overlay showing actual detections
+    Detect saturation variations (rainbow sheen) without OpenCV
+    """
+    r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
+    
+    # Simple saturation calculation
+    max_channel = np.maximum(np.maximum(r, g), b)
+    min_channel = np.minimum(np.minimum(r, g), b)
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        saturation = (max_channel - min_channel) / (max_channel + 1e-8)
+        saturation = np.nan_to_num(saturation)
+    
+    # Calculate local saturation variation
+    # Simple blur using averaging
+    saturation_blurred = simple_blur(saturation, kernel_size=5)
+    saturation_diff = np.abs(saturation - saturation_blurred)
+    
+    # High variation areas
+    if np.any(water_mask):
+        variation_threshold = np.percentile(saturation_diff[water_mask], 70)
+        high_variation = saturation_diff > variation_threshold
+    else:
+        high_variation = np.zeros_like(water_mask)
+    
+    # Combined with medium saturation
+    medium_saturation = (saturation > 0.2) & (saturation < 0.8)  # 0-255 scaled to 0-1
+    
+    return high_variation & medium_saturation & water_mask
+
+def simple_blur(image, kernel_size=3):
+    """
+    Simple blur implementation without OpenCV
+    """
+    h, w = image.shape
+    blurred = np.zeros_like(image)
+    
+    pad = kernel_size // 2
+    padded = np.pad(image, pad, mode='edge')
+    
+    for i in range(h):
+        for j in range(w):
+            window = padded[i:i+kernel_size, j:j+kernel_size]
+            blurred[i, j] = np.mean(window)
+    
+    return blurred
+
+def post_process_mask_basic(oil_mask, min_size, max_size):
+    """
+    Post-process mask without OpenCV
+    """
+    h, w = oil_mask.shape
+    binary_mask = (oil_mask > confidence_threshold).astype(np.uint8)
+    
+    # Find connected components manually
+    visited = np.zeros_like(binary_mask, dtype=bool)
+    components = []
+    
+    def flood_fill(x, y, component):
+        stack = [(x, y)]
+        while stack:
+            cx, cy = stack.pop()
+            if (0 <= cx < w and 0 <= cy < h and 
+                binary_mask[cy, cx] and not visited[cy, cx]):
+                visited[cy, cx] = True
+                component.append((cx, cy))
+                # 4-directional
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    stack.append((cx + dx, cy + dy))
+    
+    # Find all components
+    for y in range(h):
+        for x in range(w):
+            if binary_mask[y, x] and not visited[y, x]:
+                component = []
+                flood_fill(x, y, component)
+                if len(component) >= min_size and len(component) <= max_size:
+                    components.append(component)
+    
+    # Create clean mask with only valid components
+    clean_mask = np.zeros_like(binary_mask)
+    for component in components:
+        for x, y in component:
+            clean_mask[y, x] = 1
+    
+    # Smooth the mask
+    clean_mask_pil = Image.fromarray((clean_mask * 255).astype(np.uint8))
+    clean_mask_smooth = clean_mask_pil.filter(ImageFilter.GaussianBlur(radius=2))
+    clean_mask = np.array(clean_mask_smooth).astype(float) / 255.0
+    
+    return clean_mask
+
+def create_accurate_overlay(original_image, oil_mask, water_mask=None):
+    """
+    Create accurate overlay showing real detections
     """
     if isinstance(original_image, np.ndarray):
         overlay_array = original_image.copy()
     else:
         overlay_array = np.array(original_image)
     
-    # Convert to RGB if needed
+    # Ensure RGB
     if len(overlay_array.shape) == 2:
-        overlay_array = cv2.cvtColor(overlay_array, cv2.COLOR_GRAY2RGB)
+        overlay_array = np.stack([overlay_array] * 3, axis=-1)
     elif overlay_array.shape[2] == 1:
-        overlay_array = cv2.cvtColor(overlay_array, cv2.COLOR_GRAY2RGB)
+        overlay_array = np.concatenate([overlay_array] * 3, axis=-1)
     
     # Highlight water areas lightly
     if water_mask is not None:
         water_color = [100, 150, 255]  # Light blue
-        overlay_array[water_mask] = overlay_array[water_mask] * 0.8 + np.array(water_color) * 0.2
+        water_alpha = 0.15
+        
+        water_coords = np.where(water_mask)
+        for y, x in zip(water_coords[0], water_coords[1]):
+            overlay_array[y, x] = (
+                (1 - water_alpha) * overlay_array[y, x] + 
+                water_alpha * np.array(water_color)
+            )
     
-    # Highlight oil spills in red
+    # Highlight oil spills with intensity-based coloring
     oil_areas = oil_mask > confidence_threshold
     
     if np.any(oil_areas):
-        # Different colors based on confidence
+        oil_coords = np.where(oil_areas)
         oil_intensities = oil_mask[oil_areas]
         
-        for intensity, (y, x) in zip(oil_intensities, zip(*np.where(oil_areas))):
-            if intensity < 0.5:
-                # Light spill - orange
+        for intensity, (y, x) in zip(oil_intensities, zip(oil_coords[0], oil_coords[1])):
+            if intensity < 0.4:
+                # Light spill - yellow
+                overlay_array[y, x] = [255, 255, 0]
+            elif intensity < 0.7:
+                # Medium spill - orange
                 overlay_array[y, x] = [255, 165, 0]
-            elif intensity < 0.8:
-                # Medium spill - red-orange
-                overlay_array[y, x] = [255, 100, 0]
             else:
-                # Heavy spill - bright red
+                # Heavy spill - red
                 overlay_array[y, x] = [255, 0, 0]
     
     return Image.fromarray(overlay_array.astype(np.uint8))
 
-def resize_mask_properly(mask, target_shape):
-    """Resize mask properly maintaining boundaries"""
-    mask_uint8 = (mask * 255).astype(np.uint8)
-    mask_resized = cv2.resize(mask_uint8, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_NEAREST)
-    return mask_resized.astype(np.float32) / 255.0
-
 def main():
     uploaded_file = st.file_uploader(
         "📤 Upload Satellite Image", 
-        type=["jpg", "jpeg", "png", "tiff"],
+        type=["jpg", "jpeg", "png"],
         help="Upload clear satellite imagery with water bodies"
     )
     
@@ -302,18 +332,22 @@ def main():
             with col1:
                 st.subheader("🛰️ Original Image")
                 st.image(image, use_container_width=True)
-                st.caption(f"Size: {image.size} | Channels: {image_array.shape[2]}")
+                st.caption(f"Size: {image.size}")
             
             # Process image
-            with st.spinner("🔍 Performing proper oil spill detection..."):
-                # Perform actual image segmentation
-                oil_mask, water_mask = proper_image_segmentation(image_array)
+            with st.spinner("🔍 Performing accurate oil spill detection..."):
+                # Detect water areas
+                water_mask = proper_water_detection(image_array)
                 
-                # Create binary mask
-                binary_mask = (oil_mask > confidence_threshold).astype(np.uint8) * 255
+                # Detect oil spills
+                oil_mask = detect_oil_spills_basic(image_array, water_mask)
                 
-                # Create correct overlay
-                overlay_img = create_correct_overlay(image_array, oil_mask, water_mask)
+                # Post-process
+                final_mask = post_process_mask_basic(oil_mask, min_spill_size, 10000)
+                
+                # Create outputs
+                binary_mask = (final_mask > confidence_threshold).astype(np.uint8) * 255
+                overlay_img = create_accurate_overlay(image_array, final_mask, water_mask)
                 
                 # Convert to PIL for display
                 mask_display = Image.fromarray(binary_mask)
@@ -329,7 +363,7 @@ def main():
                 with col3:
                     st.subheader("🛢️ Oil Spill Detection")
                     st.image(overlay_img, use_container_width=True)
-                    st.caption("Red = Oil spills | Blue = Water areas")
+                    st.caption("Yellow/Orange/Red = Oil spill intensity")
             
             # Analysis
             spill_pixels = np.sum(binary_mask > 0)
@@ -339,7 +373,7 @@ def main():
             spill_coverage = (spill_pixels / total_pixels) * 100
             water_coverage = (water_pixels / total_pixels) * 100
             
-            st.subheader("📊 Correct Analysis Results")
+            st.subheader("📊 Accurate Analysis Results")
             
             col_anal1, col_anal2, col_anal3, col_anal4 = st.columns(4)
             
@@ -360,19 +394,20 @@ def main():
                 st.metric("Detection Method", "Computer Vision")
             
             # Technical details
-            with st.expander("🔍 Technical Detection Details"):
-                st.write("**Detection Methods Used:**")
-                st.write("- Water detection: Color analysis + NDWI + texture")
-                st.write("- Oil detection: Dark regions + rainbow sheen + color anomalies")
-                st.write("- Post-processing: Size filtering + boundary smoothing")
+            with st.expander("🔍 Detection Methodology"):
+                st.write("**Computer Vision Techniques Used:**")
+                st.write("- Water detection: Color analysis + texture + NDWI")
+                st.write("- Oil detection: Dark regions + color anomalies + edges")
+                st.write("- All processing: Pure Python (no OpenCV dependency)")
                 
-                st.write("**Detection Parameters:**")
-                st.write(f"- Confidence threshold: {confidence_threshold}")
-                st.write(f"- Min spill size: {min_spill_size} pixels")
-                st.write(f"- Max spill size: {max_spill_size} pixels")
+                st.write("**Real Oil Spill Indicators Detected:**")
+                st.write("- Darker regions in water bodies")
+                st.write("- Color anomalies and shifts")
+                st.write("- Edge patterns characteristic of spills")
+                st.write("- Saturation variations (rainbow sheen)")
             
             # Download results
-            st.subheader("💾 Download Correct Results")
+            st.subheader("💾 Download Accurate Results")
             dl_col1, dl_col2, dl_col3 = st.columns(3)
             
             with dl_col1:
@@ -412,7 +447,7 @@ def main():
             st.error(f"❌ Detection error: {str(e)}")
     
     else:
-        st.info("👆 **Upload a satellite image for proper oil spill detection**")
+        st.info("👆 **Upload a satellite image for accurate oil spill detection**")
 
 if __name__ == "__main__":
     main()
