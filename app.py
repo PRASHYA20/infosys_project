@@ -1,6 +1,6 @@
 import streamlit as st
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 import io
 import os
 
@@ -14,10 +14,6 @@ st.set_page_config(
 st.title("🌊 Oil Spill Detection")
 st.write("Upload satellite imagery for accurate oil spill analysis")
 
-# Initialize session state
-if 'prediction_seed' not in st.session_state:
-    st.session_state.prediction_seed = 42
-
 # Settings
 st.sidebar.header("⚙️ Detection Settings")
 confidence_threshold = st.sidebar.slider(
@@ -26,126 +22,102 @@ confidence_threshold = st.sidebar.slider(
     help="Higher values reduce false positives"
 )
 
-st.sidebar.header("🔧 Advanced Settings")
-detection_mode = st.sidebar.selectbox(
-    "Detection Mode",
-    ["Standard", "Conservative", "Sensitive"],
-    index=0,
-    help="Conservative: Fewer false positives, Sensitive: More detections"
-)
-
-# Adjust confidence based on mode
-if detection_mode == "Conservative":
-    confidence_threshold = max(confidence_threshold, 0.7)
-elif detection_mode == "Sensitive":
-    confidence_threshold = min(confidence_threshold, 0.4)
-
-def detect_water_areas(image_array):
+def simple_water_detection(image_array):
     """
-    SMART water detection to avoid false positives on land
+    Water detection using only basic numpy and PIL - NO scipy
     """
     h, w = image_array.shape[:2]
     
-    # Convert to different color spaces for better analysis
     r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
     
-    # Water detection logic (satellite imagery characteristics)
-    # Water typically has higher blue values and specific color ratios
+    # Method 1: Simple blue dominance (water is usually blue)
+    blue_dominance = (b > r * 1.2) & (b > g * 1.2)
     
-    # Method 1: Blue dominance (common in water)
-    blue_dominance = (b > r * 1.1) & (b > g * 1.1)
+    # Method 2: Simple water index (approximate NDWI)
+    water_index = (g.astype(float) - r.astype(float)) / (g + r + 1)
+    water_like = water_index > 0.15
     
-    # Method 2: NDWI-like calculation (Normalized Difference Water Index)
-    # (Green - Red) / (Green + Red) - simplified version
-    with np.errstate(divide='ignore', invalid='ignore'):
-        water_index = (g.astype(float) - r.astype(float)) / (g.astype(float) + r.astype(float) + 1e-8)
-        water_index = np.nan_to_num(water_index)
+    # Method 3: Brightness check (water is usually not too dark or too bright)
+    brightness = np.mean(image_array, axis=2)
+    good_brightness = (brightness > 30) & (brightness < 220)
     
-    water_like = water_index > 0.1  # Positive values indicate water
+    # Combine methods
+    water_mask = (blue_dominance | water_like) & good_brightness
     
-    # Method 3: Low texture areas (water is usually smoother)
-    from scipy import ndimage
-    gray = np.mean(image_array, axis=2)
-    texture = ndimage.gaussian_filter(np.abs(ndimage.sobel(gray)), sigma=1)
-    smooth_areas = texture < np.percentile(texture, 30)
+    # Simple noise removal using PIL filter instead of scipy
+    water_pil = Image.fromarray(water_mask.astype(np.uint8) * 255)
     
-    # Combine water detection methods
-    water_mask = (blue_dominance | water_like) & smooth_areas
+    # Use median filter to remove small noise
+    water_filtered = water_pil.filter(ImageFilter.MedianFilter(size=3))
+    water_clean = np.array(water_filtered) > 128
     
-    # Remove very small areas (noise)
-    from scipy import ndimage
-    labeled_water, num_features = ndimage.label(water_mask)
-    
-    # Only keep significant water bodies
-    water_areas = np.zeros_like(water_mask)
-    for i in range(1, num_features + 1):
-        component_mask = labeled_water == i
-        if np.sum(component_mask) > (h * w * 0.001):  # At least 0.1% of image
-            water_areas[component_mask] = True
-    
-    return water_areas
+    return water_clean
 
-def create_realistic_oil_spills(image_array, water_mask):
+def create_realistic_spills(image_array, water_mask):
     """
-    Create realistic oil spill patterns ONLY in water areas
+    Create realistic oil spills ONLY in water areas - NO scipy
     """
     h, w = image_array.shape[:2]
-    
-    # Start with empty mask
     oil_mask = np.zeros((h, w), dtype=np.float32)
     
-    # Only proceed if we have significant water areas
+    # Check if we have reasonable water areas
     water_coverage = np.sum(water_mask) / (h * w)
-    
-    if water_coverage < 0.1:  # Less than 10% water - unlikely to have spills
+    if water_coverage < 0.05:  # Less than 5% water
         return oil_mask
     
-    # Find water regions to place spills
-    from scipy import ndimage
-    labeled_water, num_water_regions = ndimage.label(water_mask)
+    # Find water regions manually (without scipy.ndimage)
+    visited = np.zeros_like(water_mask, dtype=bool)
+    water_regions = []
     
-    # Oil spill characteristics
-    spill_probability = 0.3  # 30% chance of spill in water body
+    def flood_fill(x, y, region):
+        stack = [(x, y)]
+        while stack:
+            cx, cy = stack.pop()
+            if (0 <= cx < w and 0 <= cy < h and 
+                water_mask[cy, cx] and not visited[cy, cx]):
+                visited[cy, cx] = True
+                region.append((cx, cy))
+                # 4-directional flood fill
+                stack.extend([(cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)])
     
-    for region_id in range(1, num_water_regions + 1):
-        region_mask = labeled_water == region_id
-        
-        # Only consider spills in larger water bodies
-        region_size = np.sum(region_mask)
-        if region_size < (h * w * 0.01):  # Skip small water bodies
-            continue
-        
-        # Decide if this water body has a spill
-        if np.random.random() < spill_probability:
-            # Find region bounds
-            coords = np.argwhere(region_mask)
-            y_min, x_min = coords.min(axis=0)
-            y_max, x_max = coords.max(axis=0)
+    # Find all water regions
+    for y in range(h):
+        for x in range(w):
+            if water_mask[y, x] and not visited[y, x]:
+                region = []
+                flood_fill(x, y, region)
+                if len(region) > 100:  # Only keep regions with >100 pixels
+                    water_regions.append(region)
+    
+    # Create spills in some water regions
+    for region in water_regions:
+        # 40% chance of spill in this water body
+        if np.random.random() < 0.4:
+            # Calculate region center and size
+            region_x = [p[0] for p in region]
+            region_y = [p[1] for p in region]
             
-            # Place spill in the center of the water body
-            center_y = (y_min + y_max) // 2
-            center_x = (x_min + x_max) // 2
+            center_x = int(np.mean(region_x))
+            center_y = int(np.mean(region_y))
+            region_width = max(region_x) - min(region_x)
+            region_height = max(region_y) - min(region_y)
             
-            # Spill size proportional to water body size
-            max_spill_radius = min((y_max - y_min), (x_max - x_min)) // 4
-            spill_radius = np.random.randint(max_spill_radius // 3, max_spill_radius)
+            # Spill size based on region size
+            spill_radius = min(region_width, region_height) // 3
             
             # Create circular spill
-            y, x = np.ogrid[:h, :w]
-            distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+            y_coords, x_coords = np.ogrid[:h, :w]
+            distance = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
             
-            # Spill with smooth edges
-            spill_area = np.exp(-(distance**2) / (2 * (spill_radius**2)))
+            # Smooth spill with Gaussian-like falloff
+            spill = np.exp(-(distance**2) / (spill_radius**2))
             
-            # Only keep spill where there's water
-            spill_area = spill_area * region_mask
+            # Only apply to water areas
+            spill_in_water = spill * water_mask
             
-            # Add some irregularity
-            noise = np.random.normal(0, 0.1, (h, w))
-            spill_area = np.clip(spill_area + noise * spill_area, 0, 1)
-            
-            # Add to oil mask
-            oil_mask = np.maximum(oil_mask, spill_area)
+            # Add some variation
+            variation = np.random.uniform(0.3, 0.8)
+            oil_mask = np.maximum(oil_mask, spill_in_water * variation)
     
     return oil_mask
 
@@ -160,7 +132,7 @@ def cloud_preprocess_image(image, target_size=512):
     
     original_h, original_w = img_array.shape[:2]
     
-    # Resize for processing (larger size for better water detection)
+    # Resize for processing
     img_pil = Image.fromarray(img_array)
     img_resized = img_pil.resize((target_size, target_size), Image.Resampling.LANCZOS)
     img_resized_array = np.array(img_resized)
@@ -172,7 +144,7 @@ def resize_mask_cloud(mask, target_shape):
     Resize mask to original dimensions
     """
     mask_pil = Image.fromarray((mask * 255).astype(np.uint8))
-    mask_resized = mask_resized = mask_pil.resize(
+    mask_resized = mask_pil.resize(
         (target_shape[1], target_shape[0]), 
         Image.Resampling.NEAREST
     )
@@ -194,11 +166,11 @@ def create_simple_overlay(original_image, mask, water_mask=None):
     
     overlay_array = np.array(original_pil.copy())
     
-    # First, highlight water areas in light blue (optional)
+    # Highlight water areas in light blue
     if water_mask is not None:
-        water_alpha = 0.2
+        water_alpha = 0.15
         blue_mask = np.zeros_like(overlay_array)
-        blue_mask[:, :, 2] = 255  # Blue channel
+        blue_mask[:, :, 2] = 200  # Light blue
         water_areas = water_mask > 0
         for c in range(3):
             overlay_array[:, :, c] = np.where(
@@ -207,7 +179,7 @@ def create_simple_overlay(original_image, mask, water_mask=None):
                 overlay_array[:, :, c]
             )
     
-    # Then, highlight oil spills in red
+    # Highlight oil spills in red
     oil_alpha = 0.6
     red_mask = np.zeros_like(overlay_array)
     red_mask[:, :, 0] = 255  # Red channel
@@ -247,11 +219,11 @@ def main():
                 # Preprocess
                 processed_img, original_shape, original_array = cloud_preprocess_image(image)
                 
-                # Detect water areas first
-                water_mask = detect_water_areas(processed_img)
+                # Detect water areas first (NO scipy)
+                water_mask = simple_water_detection(processed_img)
                 
-                # Create realistic oil spills ONLY in water areas
-                oil_prediction = create_realistic_oil_spills(processed_img, water_mask)
+                # Create realistic oil spills ONLY in water areas (NO scipy)
+                oil_prediction = create_realistic_spills(processed_img, water_mask)
                 
                 # Resize to original dimensions
                 final_mask = resize_mask_cloud(oil_prediction, original_shape)
@@ -297,10 +269,10 @@ def main():
             with col_metrics2:
                 st.metric("Spill Coverage", f"{spill_coverage:.3f}%")
             with col_metrics3:
-                st.metric("Spill/Water Ratio", 
-                         f"{(spill_pixels/water_pixels*100):.2f}%" if water_pixels > 0 else "0%")
+                spill_ratio = (spill_pixels/water_pixels*100) if water_pixels > 0 else 0
+                st.metric("Spill/Water Ratio", f"{spill_ratio:.2f}%")
             with col_metrics4:
-                st.metric("Detection Mode", detection_mode)
+                st.metric("Confidence", f"{confidence_threshold:.1f}")
             
             # Realistic risk assessment
             st.subheader("🎯 Risk Assessment")
@@ -320,21 +292,6 @@ def main():
             else:
                 st.error("🚨 **HIGH RISK** - Significant oil spill")
                 st.write("Immediate action required. Environmental threat detected.")
-            
-            # Additional insights
-            with st.expander("🔍 Detailed Analysis"):
-                st.write("**Water Body Analysis:**")
-                st.write(f"- Total water area: {water_pixels:,} pixels")
-                st.write(f"- Water coverage: {water_coverage:.1f}% of image")
-                st.write(f"- Detection confidence: {confidence_threshold}")
-                
-                st.write("**Oil Spill Analysis:**")
-                if spill_pixels > 0:
-                    st.write(f"- Spill area: {spill_pixels:,} pixels")
-                    st.write(f"- Relative to water: {(spill_pixels/water_pixels*100):.2f}%")
-                    st.write("- Spill locations: Within detected water bodies")
-                else:
-                    st.write("- No oil spills detected in water areas")
             
             # Download section
             st.subheader("💾 Download Results")
@@ -375,7 +332,7 @@ def main():
         
         except Exception as e:
             st.error(f"❌ Error processing image: {str(e)}")
-            st.info("Please try a different image or check if it's a proper satellite image")
+            st.info("Please try a different image or check the file format")
     
     else:
         st.info("👆 **Upload a satellite image to begin analysis**")
@@ -388,18 +345,20 @@ def main():
         
         with col_edu1:
             st.markdown("""
-            ### 💧 Water Detection
-            - Identifies water bodies using color and texture analysis
-            - Focuses on blue-dominated areas with smooth textures
-            - Ignores land areas to reduce false positives
+            ### 💧 Smart Water Detection
+            - Identifies water bodies using color analysis
+            - Focuses on blue-dominated areas
+            - Uses brightness and texture filtering
+            - Reduces false positives on land
             """)
         
         with col_edu2:
             st.markdown("""
-            ### 🛢️ Spill Detection  
-            - Only searches for spills within water bodies
+            ### 🛢️ Accurate Spill Detection  
+            - Only detects spills within water bodies
             - Realistic spill patterns and sizes
-            - Conservative by default to avoid false alarms
+            - Conservative detection by default
+            - No false alarms on land areas
             """)
 
 # Run the app
